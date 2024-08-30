@@ -1,0 +1,131 @@
+#Autor: Victor Paulo Ribeiro de Oliveira - Dispositivo de Telemetria e Monitoramento de carga e condição de bateria para e-Scooter -UFG
+#include "ACS712.h"
+#include <Wire.h>
+#include "BluetoothSerial.h"
+
+// Inicialização do sensor ACS712 no pino 34, com tensão de referência de 3.3V, 
+// resolução ADC de 4095 (12 bits do ESP32) e sensibilidade de 66mV/A.
+ACS712 ACS(34, 3.3, 4095, 66);
+
+// Declaração de Portas
+#define vs1Pin 32 // Pino 32 - Leitura da Tensão através do Divisor de Tensão
+#define viPin 34  // Pino 34 - Leitura da Corrente com ACS712
+
+// Declaração de Variáveis
+float vout = 0.0;    // Tensão medida na saída do divisor de tensão
+float vin = 0.0;     // Tensão de entrada calculada a partir do divisor de tensão
+float vbat = 0.0;    // Tensão da bateria
+float ibat = 0.0;    // Corrente da bateria
+float R1 = 10700.0;  // Resistor R1 no divisor de tensão (11K ohms)
+float R2 = 1000.0;   // Resistor R2 no divisor de tensão (1K ohms)
+float iatual = 0.0;  // Corrente atual medida
+float amper = 0.0;   // Corrente em amperes calculada a partir do ACS712
+float potencia = 0.0; // Potência calculada (tensão * corrente)
+float carga = 0.0;   // Estado de carga da bateria em porcentagem
+char saude[10] = "TESTE"; // Indicador da saúde da bateria (BOA ou RUIM)
+float tensaoPadrao = 12.0; // Tensão padrão para referência
+int n = 0;           // Contador para testes realizados
+
+// Definições para o sensor e ADC
+const int sensorPin = 34;   // Pino ADC do ESP32 conectado ao divisor de tensão (repetição desnecessária, já está definido como viPin)
+const float vRef = 3.3;     // Tensão de referência do ADC do ESP32
+const int resolucaoADC = 4096; // Resolução do ADC do ESP32 (12 bits)
+const float fatorDivisor = 14.7 / 10; // Fator de divisão do divisor de tensão (aproximadamente 1.47)
+const float sensibilidade = 0.066; // Sensibilidade do sensor ACS712-30A em V/A (66mV/A)
+const int numSamplesTensao = 10; // Número de amostras para leitura da tensão
+const float alpha = 0.1;    // Fator de suavização (não está sendo usado no código)
+
+BluetoothSerial SerialBT;   // Instância para comunicação serial Bluetooth
+
+void setup() {
+    // Configuração dos pinos de entrada para leitura de tensão e corrente
+    pinMode(vs1Pin, INPUT);
+    pinMode(viPin, INPUT);
+
+    // Inicializa o Bluetooth Serial com o nome "ESP32_Telemetria"
+    SerialBT.begin("ESP32_Telemetria");
+    SerialBT.println("Telemetria com bateria de E-scooter");
+    SerialBT.println("Calibrando...");
+
+    // Calibração automática do ponto médio do sensor ACS712
+    ACS.autoMidPoint();
+    SerialBT.print("Ponto médio do sensor ACS712: ");
+    SerialBT.println(ACS.getMidPoint());
+
+    delay(2000); // Aguarda 2 segundos para estabilização
+}
+
+void loop() {
+    // Leitura e cálculo da tensão da bateria usando o divisor de tensão
+    long totalValorTensao = analogRead(vs1Pin); // Leitura do valor ADC do pino de tensão
+    vout = (totalValorTensao * vRef) / (resolucaoADC - 1); // Conversão do valor ADC para tensão
+    vin = vout / (R2 / (R1 + R2)); // Calcula a tensão de entrada original a partir do divisor de tensão
+    vbat += ((vin - vbat) / numSamplesTensao); // Suaviza a leitura da tensão
+
+    // Leitura e cálculo da corrente usando o sensor ACS712
+    int valorADC = analogRead(sensorPin); // Ler valor do ADC
+    float tensaoDivisao = (valorADC * vRef) / resolucaoADC; // Converter leitura ADC para tensão após o divisor
+    float tensaoOriginal = tensaoDivisao * fatorDivisor; // Calcular a tensão original antes do divisor
+    float corrente = (tensaoOriginal - (vRef / 2)) / sensibilidade; // Calcular corrente em Amperes
+    amper = corrente;
+    ibat += ((amper - ibat) / numSamplesTensao); // Suaviza a leitura da corrente
+
+    // Cálculo da potência da bateria (tensão * corrente)
+    potencia = vbat * ibat;
+
+    // Calcular o estado de carga (SOC) com base na tabela de tensões
+    carga = calcularSOC(vbat);
+
+    // Determina a "saúde" da bateria com base no SOC
+    if (carga < 10) {
+        strcpy(saude, "RUIM");
+    } else {
+        strcpy(saude, "BOA");
+    }
+
+    // Enviar os dados via Bluetooth
+    SerialBT.print("\033[2J\033[H"); // Comando para limpar o terminal
+    SerialBT.println("Telemetria com bateria de E-scooter");
+
+    SerialBT.print("Tensão: ");
+    SerialBT.print(vbat);
+    SerialBT.println(" V");
+
+    SerialBT.print("Corrente: ");
+    SerialBT.print(ibat);
+    SerialBT.println(" A");
+
+    SerialBT.print("Potência: ");
+    SerialBT.print(potencia);
+    SerialBT.println(" W");
+
+    SerialBT.print("Carga: ");
+    SerialBT.print(carga);
+    SerialBT.println(" %");
+
+    SerialBT.print("Saúde da Bateria: ");
+    SerialBT.println(saude);
+
+    SerialBT.print("Testes Realizados: ");
+    SerialBT.println(n);
+
+    n++; // Incrementa o contador de testes realizados
+
+    delay(1000); // Aguarda 1 segundo antes de repetir o loop
+}
+
+// Função para calcular o estado de carga (SOC) com base na tensão da bateria
+float calcularSOC(float tensao) {
+    if (tensao >= 14.6) return 100.0;
+    else if (tensao >= 13.6) return 90.0 + (tensao - 13.6) / (14.6 - 13.6) * 10.0;
+    else if (tensao >= 13.4) return 80.0 + (tensao - 13.4) / (13.6 - 13.4) * 10.0;
+    else if (tensao >= 13.28) return 70.0 + (tensao - 13.28) / (13.4 - 13.28) * 10.0;
+    else if (tensao >= 13.2) return 60.0 + (tensao - 13.2) / (13.28 - 13.2) * 10.0;
+    else if (tensao >= 13.08) return 50.0 + (tensao - 13.08) / (13.2 - 13.08) * 10.0;
+    else if (tensao >= 13.04) return 40.0 + (tensao - 13.04) / (13.08 - 13.04) * 10.0;
+    else if (tensao >= 13.0) return 30.0 + (tensao - 13.0) / (13.04 - 13.0) * 10.0;
+    else if (tensao >= 12.88) return 20.0 + (tensao - 12.88) / (13.0 - 12.88) * 10.0;
+    else if (tensao >= 12.8) return 10.0 + (tensao - 12.8) / (12.88 - 12.8) * 10.0;
+    else if (tensao >= 12.0) return (tensao - 12.0) / (12.8 - 12.0) * 10.0;
+    else return 0.0;
+}
